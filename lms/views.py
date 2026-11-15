@@ -4,7 +4,7 @@ from rest_framework import viewsets, generics
 from rest_framework.filters import OrderingFilter
 
 from lms.models import Course, Lesson
-from lms.serializers import CourseSerializer, LessonSerializer, UserSerializer, PaymentSerializer
+from lms.serializers import CourseSerializer, LessonSerializer, UserSerializer, PaymentSerializer, UserPaymentSerializer
 from users.models import Payment
 
 
@@ -53,5 +53,9 @@ class PaymentListAPIView(generics.ListAPIView):
     filterset_fields = ['course', 'lesson', 'payment_method']
     ordering_fields = ('paid_at',)
     ordering = ['-paid_at']
+
+class UserPaymentRetrieveAPIView(generics.RetrieveAPIView):
+    queryset = User.objects.prefetch_related('payments')
+    serializer_class = UserPaymentSerializer
 
 

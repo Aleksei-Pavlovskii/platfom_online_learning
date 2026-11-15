@@ -44,3 +44,21 @@ class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
         fields = '__all__'
+
+
+class UserPaymentSerializer(serializers.ModelSerializer):
+    payments = PaymentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'email',
+            'first_name',
+            'last_name',
+            'phone',
+            'city',
+            'avatar',
+            'payments',
+        ]
+        read_only_fields = ['id', 'email']
