@@ -19,10 +19,16 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'email']
 
+
 class CourseSerializer(serializers.ModelSerializer):
+    count_lessons = serializers.SerializerMethodField()
+
     class Meta:
         model = Course
         fields = '__all__'
+
+    def get_count_lessons(self, obj):
+        return obj.lessons.count()
 
 
 class LessonSerializer(serializers.ModelSerializer):
