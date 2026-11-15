@@ -2,6 +2,8 @@ from rest_framework import serializers
 from lms.models import Course, Lesson
 from django.contrib.auth import get_user_model
 
+from users.models import Payment
+
 User = get_user_model()
 
 
@@ -36,3 +38,9 @@ class CourseSerializer(serializers.ModelSerializer):
 
     def get_count_lessons(self, obj):
         return obj.lessons.count()
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Payment
+        fields = '__all__'
