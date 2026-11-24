@@ -5,7 +5,7 @@ from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import IsAuthenticated
 
 from lms.models import Course, Lesson
-from lms.permissions import IsModeratorOrReadOnly
+from lms.permissions import IsModeratorOrOwner
 from lms.serializers import CourseSerializer, LessonSerializer, UserSerializer, PaymentSerializer, UserPaymentSerializer
 from users.models import Payment
 
@@ -14,37 +14,48 @@ class CourseViewSet(viewsets.ModelViewSet):
     queryset = Course.objects.all()
     serializer_class = CourseSerializer
 
-    permission_classes = [IsAuthenticated, IsModeratorOrReadOnly]
+    permission_classes = [IsAuthenticated, IsModeratorOrOwner]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_staff or user.groups.filter(name='Moderators').exists():
+            return Course.objects.all()
+        return Course.objects.filter(owner=user)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
 
 
-class LessonCreateAPIView(generics.CreateAPIView):
+class LessonBaseAPIView(generics.GenericAPIView):
     serializer_class = LessonSerializer
-    queryset = Lesson.objects.all()
-    permission_classes = [IsAuthenticated, IsModeratorOrReadOnly]
+    permission_classes = [IsAuthenticated, IsModeratorOrOwner]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_staff or user.groups.filter(name='Moderators').exists():
+            return Lesson.objects.all()
+        return Lesson.objects.filter(owner=user)
 
 
-class LessonListAPIView(generics.ListAPIView):
-    serializer_class = LessonSerializer
-    queryset = Lesson.objects.all()
-    permission_classes = [IsAuthenticated, IsModeratorOrReadOnly]
+class LessonCreateAPIView(LessonBaseAPIView, generics.CreateAPIView):
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
 
 
-class LessonRetrieveAPIView(generics.RetrieveAPIView):
-    serializer_class = LessonSerializer
-    queryset = Lesson.objects.all()
-    permission_classes = [IsAuthenticated, IsModeratorOrReadOnly]
+class LessonListAPIView(LessonBaseAPIView, generics.ListAPIView):
+    pass
 
 
-class LessonUpdateAPIView(generics.UpdateAPIView):
-    serializer_class = LessonSerializer
-    queryset = Lesson.objects.all()
-    permission_classes = [IsAuthenticated, IsModeratorOrReadOnly]
+class LessonRetrieveAPIView(LessonBaseAPIView, generics.RetrieveAPIView):
+    pass
 
 
-class LessonDestroyAPIView(generics.DestroyAPIView):
-    serializer_class = LessonSerializer
-    queryset = Lesson.objects.all()
-    permission_classes = [IsAuthenticated, IsModeratorOrReadOnly]
+class LessonUpdateAPIView(LessonBaseAPIView, generics.UpdateAPIView):
+    pass
+
+
+class LessonDestroyAPIView(LessonBaseAPIView, generics.DestroyAPIView):
+    pass
 
 
 User = get_user_model()
@@ -64,8 +75,7 @@ class PaymentListAPIView(generics.ListAPIView):
     ordering_fields = ('paid_at',)
     ordering = ['-paid_at']
 
+
 class UserPaymentRetrieveAPIView(generics.RetrieveAPIView):
     queryset = User.objects.prefetch_related('payments')
     serializer_class = UserPaymentSerializer
-
-
