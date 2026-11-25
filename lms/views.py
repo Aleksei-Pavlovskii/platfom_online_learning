@@ -2,6 +2,7 @@ from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, generics, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -45,6 +46,9 @@ class LessonBaseAPIView(generics.GenericAPIView):
 
 class LessonCreateAPIView(LessonBaseAPIView, generics.CreateAPIView):
     def perform_create(self, serializer):
+        course = serializer.validated_data['course']
+        if course.owner_id != self.request.user.id:
+            raise PermissionDenied('Добавлять урок можно только в свой курс.')
         serializer.save(owner=self.request.user)
 
 
