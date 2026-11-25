@@ -141,11 +141,11 @@ cp .env.example .env
 SECRET_KEY=change-me-to-a-long-random-string
 DEBUG=True
 
-NAME=lms_db
-USER=postgres
-PASSWORD=your_password
-HOST=127.0.0.1
-PORT=5432
+DB_NAME=lms_db
+DB_USER=postgres
+DB_PASSWORD=your_password
+DB_HOST=127.0.0.1
+DB_PORT=5432
 ```
 
 > ⚠️ Если в `settings.py` используются имена `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT` — переименуйте их в `DB_*`. Имена `USER` и `NAME` конфликтуют со стандартными переменными окружения ОС и могут привести к неожиданному подключению.

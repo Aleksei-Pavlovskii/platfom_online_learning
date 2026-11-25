@@ -34,3 +34,9 @@ class IsModeratorOrOwner(BasePermission):
         if is_moderator:
             return request.method in SAFE_METHODS or request.method in ('PUT', 'PATCH')
         return obj.owner_id == request.user.id
+
+
+class IsProfileOwnerOrAdmin(BasePermission):
+
+    def has_object_permission(self, request, view, obj):
+        return request.user.is_staff or obj == request.user

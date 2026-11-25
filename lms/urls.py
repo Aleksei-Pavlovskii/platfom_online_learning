@@ -9,13 +9,13 @@ from lms.views import (
     LessonUpdateAPIView,
     LessonDestroyAPIView,
     LessonRetrieveAPIView,
-    UserRetrieveUpdateAPIView, PaymentListAPIView, UserPaymentRetrieveAPIView
+    UserRetrieveUpdateAPIView, PaymentListAPIView, UserPaymentRetrieveAPIView, SubscriptionAPIView
 )
 
 app_name = LmsConfig.name
 
 router = DefaultRouter()
-router.register(r'courses', CourseViewSet, basename='courses')
+router.register(r'courses', CourseViewSet, basename='course')
 
 urlpatterns = [
                   path('lessons/', LessonListAPIView.as_view(), name='lessons-list'),
@@ -25,5 +25,6 @@ urlpatterns = [
                   path('lessons/<int:pk>/delete/', LessonDestroyAPIView.as_view(), name='lesson-delete'),
                   path('users/<int:pk>/', UserRetrieveUpdateAPIView.as_view(), name='user-retrieve-update'),
                   path('payments/', PaymentListAPIView.as_view(), name='payment-list'),
-                  path('user/<int:pk>/payments/', UserPaymentRetrieveAPIView.as_view(), name='user-payment-retrieve'),
+                  path('users/<int:pk>/payments/', UserPaymentRetrieveAPIView.as_view(), name='user-payments'),
+                  path('subscriptions/', SubscriptionAPIView.as_view(), name='subscription-toggle'),
               ] + router.urls
