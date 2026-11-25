@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -13,6 +14,15 @@ class Course(models.Model):
         verbose_name='Превью'
     )
     description = models.TextField(verbose_name='Описание')
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='courses',
+        verbose_name='Владелец',
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         verbose_name = 'Курс'
@@ -47,6 +57,15 @@ class Lesson(models.Model):
         max_length=500,
         blank=True,
         verbose_name='Ссылка на видео',
+    )
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='lessons',
+        verbose_name='Владелец',
+        null=True,
+        blank=True,
     )
 
     def __str__(self):
