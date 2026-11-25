@@ -15,7 +15,7 @@ from lms.views import (
 app_name = LmsConfig.name
 
 router = DefaultRouter()
-router.register(r'courses', CourseViewSet, basename='courses')
+router.register(r'courses', CourseViewSet, basename='course')
 
 urlpatterns = [
                   path('lessons/', LessonListAPIView.as_view(), name='lessons-list'),
