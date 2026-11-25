@@ -1,10 +1,13 @@
 from django.contrib.auth import get_user_model
+from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import viewsets, generics
+from rest_framework import viewsets, generics, status
 from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from lms.models import Course, Lesson
+from lms.models import Course, Lesson, Subscription
 from lms.permissions import IsModeratorOrOwner, IsProfileOwnerOrAdmin
 from lms.serializers import CourseSerializer, LessonSerializer, UserSerializer, PaymentSerializer, UserPaymentSerializer
 from users.models import Payment
@@ -80,3 +83,29 @@ class UserPaymentRetrieveAPIView(generics.RetrieveAPIView):
     queryset = User.objects.prefetch_related('payments')
     serializer_class = UserPaymentSerializer
     permission_classes = [IsAuthenticated, IsProfileOwnerOrAdmin]
+
+
+class SubscriptionAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        course_id = request.data.get('course_id')
+        if not course_id:
+            return Response(
+                {'error': 'Поле course_id обязательно.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        course_item = get_object_or_404(Course, pk=course_id)
+
+        subs_item = Subscription.objects.filter(user=user, course=course_item)
+
+        if subs_item.exists():
+            subs_item.delete()
+            message = 'Подписка удалена'
+            subscribed = False
+        else:
+            Subscription.objects.create(user=user, course=course_item)
+            message = 'Подписка добавлена'
+            subscribed = True
+
+        return Response({'message': message, 'subscribed': subscribed})
