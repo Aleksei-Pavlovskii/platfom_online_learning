@@ -119,3 +119,8 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
 }
+
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_...')
+STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_...')
+STRIPE_SUCCESS_URL = 'http://127.0.0.1:8000/payment/success/'
+STRIPE_CANCEL_URL = 'http://127.0.0.1:8000/payment/cancel/'
