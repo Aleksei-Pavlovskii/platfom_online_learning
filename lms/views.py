@@ -3,7 +3,9 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
+from drf_spectacular.utils import extend_schema
 from rest_framework import viewsets, generics, status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import OrderingFilter
@@ -152,7 +154,7 @@ class PaymentCreateAPIView(APIView):
             item = Course.objects.filter(pk=course_id).first()
             if not item:
                 return Response({'error': 'Курс не найден.'}, status=404)
-            amount = Decimal('4990.00')  # ← цена курса (можно взять из модели)
+            amount = item.price
             item_name = f'Курс: {item.title}'
             item_description = item.description or ''
             payment = Payment(user=request.user, course=item, amount=amount)
@@ -161,7 +163,7 @@ class PaymentCreateAPIView(APIView):
             item = Lesson.objects.filter(pk=lesson_id).first()
             if not item:
                 return Response({'error': 'Урок не найден.'}, status=404)
-            amount = Decimal('490.00')
+            amount = item.price
             item_name = f'Урок: {item.title}'
             item_description = item.description or ''
             payment = Payment(user=request.user, lesson=item, amount=amount)
@@ -189,7 +191,7 @@ class PaymentCreateAPIView(APIView):
         payment.stripe_price_id = price['id']
         payment.stripe_session_id = session['id']
         payment.payment_url = session['url']
-        payment.payment_method = Payment.CASH
+        payment.payment_method = Payment.STRIPE
         payment.save()
 
         return Response({
@@ -201,7 +203,6 @@ class PaymentCreateAPIView(APIView):
 
 
 class PaymentStatusAPIView(APIView):
-    """GET /payments/<pk>/status/ — проверка статуса сессии в Stripe."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
@@ -212,17 +213,52 @@ class PaymentStatusAPIView(APIView):
             return Response({'error': 'У платежа нет Stripe-сессии.'}, status=400)
 
         session_data = retrieve_stripe_session(payment.stripe_session_id)
+
+        if session_data['payment_status'] == 'paid' and not payment.paid_at:
+            payment.paid_at = timezone.now()
+            payment.save(update_fields=['paid_at'])
+
         return Response({
             'payment_id': payment.id,
             'stripe_status': session_data['status'],
             'stripe_payment_status': session_data['payment_status'],
+            'paid_at': payment.paid_at,
         })
 
 class PaymentSuccessAPIView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(  # ← декоратор над методом
+        summary='Создать платёж через Stripe',
+        description='...',
+        request={...},
+        responses={...},
+    )
+
     def get(self, request):
-        return Response({'message': 'Оплата прошла успешно!'})
+        session_id = request.query_params.get('session_id')
+        if not session_id:
+            return Response({'message': 'Оплата прошла успешно!'})
+
+        payment = Payment.objects.filter(stripe_session_id=session_id).first()
+        if not payment:
+            return Response({
+                'message': 'Оплата прошла успешно, но платёж не найден в системе.',
+                'session_id': session_id,
+            })
+
+        from lms.services.stripe_service import retrieve_stripe_session
+        session_data = retrieve_stripe_session(session_id)
+        if session_data['payment_status'] == 'paid' and not payment.paid_at:
+            payment.paid_at = timezone.now()
+            payment.save(update_fields=['paid_at'])
+
+        return Response({
+            'message': 'Оплата прошла успешно!',
+            'session_id': session_id,
+            'stripe_payment_status': session_data['payment_status'],
+            'paid_at': payment.paid_at,
+        })
 
 
 class PaymentCancelAPIView(APIView):

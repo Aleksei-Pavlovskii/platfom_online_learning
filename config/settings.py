@@ -122,5 +122,14 @@ SIMPLE_JWT = {
 
 STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', 'sk_test_...')
 STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_...')
-STRIPE_SUCCESS_URL = 'http://127.0.0.1:8000/payment/success/'
+STRIPE_SUCCESS_URL = 'http://127.0.0.1:8000/payment/success/?session_id={CHECKOUT_SESSION_ID}'
 STRIPE_CANCEL_URL = 'http://127.0.0.1:8000/payment/cancel/'
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'LMS API',
+    'DESCRIPTION': 'Платформа онлайн-обучения',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
+
+STRIPE_CURRENCY = os.getenv('STRIPE_CURRENCY', 'usd')
