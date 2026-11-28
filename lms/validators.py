@@ -24,3 +24,12 @@ class YouTubeUrlValidator:
                     'Ссылки на сторонние ресурсы запрещены.'
                 )
             })
+
+    def validate_youtube_url(value):
+        parsed = urlparse(value)
+        allowed_hosts = {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'}
+
+        if parsed.scheme not in {'http', 'https'} or parsed.hostname not in allowed_hosts:
+            raise serializers.ValidationError('Укажите корректную ссылку на YouTube.')
+
+        return value

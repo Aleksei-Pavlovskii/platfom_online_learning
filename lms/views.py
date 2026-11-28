@@ -1,9 +1,13 @@
+from decimal import Decimal
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, generics, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import OrderingFilter
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -45,6 +49,9 @@ class LessonBaseAPIView(generics.GenericAPIView):
 
 class LessonCreateAPIView(LessonBaseAPIView, generics.CreateAPIView):
     def perform_create(self, serializer):
+        course = serializer.validated_data['course']
+        if course.owner_id != self.request.user.id:
+            raise PermissionDenied('Добавлять урок можно только в свой курс.')
         serializer.save(owner=self.request.user)
 
 
@@ -113,3 +120,113 @@ class SubscriptionAPIView(APIView):
             subscribed = True
 
         return Response({'message': message, 'subscribed': subscribed})
+
+
+from lms.services.stripe_service import (
+    create_stripe_product,
+    create_stripe_price,
+    create_stripe_checkout_session,
+    retrieve_stripe_session,
+)
+from users.models import Payment
+
+
+class PaymentCreateAPIView(APIView):
+    """
+    Создаёт продукт, цену, сессию в Stripe и сохраняет Payment.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        course_id = request.data.get('course_id')
+        lesson_id = request.data.get('lesson_id')
+
+        if not course_id and not lesson_id:
+            return Response(
+                {'error': 'Укажите course_id или lesson_id.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if course_id:
+            from lms.models import Course
+            item = Course.objects.filter(pk=course_id).first()
+            if not item:
+                return Response({'error': 'Курс не найден.'}, status=404)
+            amount = Decimal('4990.00')  # ← цена курса (можно взять из модели)
+            item_name = f'Курс: {item.title}'
+            item_description = item.description or ''
+            payment = Payment(user=request.user, course=item, amount=amount)
+        else:
+            from lms.models import Lesson
+            item = Lesson.objects.filter(pk=lesson_id).first()
+            if not item:
+                return Response({'error': 'Урок не найден.'}, status=404)
+            amount = Decimal('490.00')
+            item_name = f'Урок: {item.title}'
+            item_description = item.description or ''
+            payment = Payment(user=request.user, lesson=item, amount=amount)
+
+        # 1. Продукт
+        product = create_stripe_product(name=item_name, description=item_description)
+
+        # 2. Цена (в центах!)
+        price = create_stripe_price(
+            product_id=product['id'],
+            amount=int(amount * 100),
+            currency='usd',
+        )
+
+        # 3. Сессия
+        session = create_stripe_checkout_session(
+            price_id=price['id'],
+            success_url=settings.STRIPE_SUCCESS_URL,
+            cancel_url=settings.STRIPE_CANCEL_URL,
+            metadata={'payment_user_id': request.user.id},
+        )
+
+        # 4. Сохраняем Payment
+        payment.stripe_product_id = product['id']
+        payment.stripe_price_id = price['id']
+        payment.stripe_session_id = session['id']
+        payment.payment_url = session['url']
+        payment.payment_method = Payment.CASH
+        payment.save()
+
+        return Response({
+            'payment_id': payment.id,
+            'amount': str(payment.amount),
+            'payment_url': payment.payment_url,
+            'session_id': payment.stripe_session_id,
+        }, status=status.HTTP_201_CREATED)
+
+
+class PaymentStatusAPIView(APIView):
+    """GET /payments/<pk>/status/ — проверка статуса сессии в Stripe."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        payment = Payment.objects.filter(pk=pk, user=request.user).first()
+        if not payment:
+            return Response({'error': 'Платёж не найден.'}, status=404)
+        if not payment.stripe_session_id:
+            return Response({'error': 'У платежа нет Stripe-сессии.'}, status=400)
+
+        session_data = retrieve_stripe_session(payment.stripe_session_id)
+        return Response({
+            'payment_id': payment.id,
+            'stripe_status': session_data['status'],
+            'stripe_payment_status': session_data['payment_status'],
+        })
+
+class PaymentSuccessAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({'message': 'Оплата прошла успешно!'})
+
+
+class PaymentCancelAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({'message': 'Оплата отменена.'})

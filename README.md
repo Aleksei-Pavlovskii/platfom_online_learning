@@ -1,13 +1,15 @@
 # LMS — платформа онлайн-обучения
 
-Django + Django REST Framework проект для онлайн-обучения: курсы, уроки, кастомная модель пользователя и платежи. Реализован CRUD для курсов (ViewSet), уроков (Generic-классы), профиля пользователя (RetrieveUpdateAPIView), список платежей с фильтрацией и сортировкой, а также история платежей в профиле пользователя.
+Django + Django REST Framework проект для онлайн-обучения: курсы, уроки, кастомная модель пользователя, платежи, подписка на обновления курса, оплата через Stripe, права доступа (модераторы / владельцы), фильтрация и сортировка, пагинация, тесты.
 
 ## Стек
 
 - Python 3.11+
 - Django 5.x
 - Django REST Framework 3.15+
+- djangorestframework-simplejwt (JWT-авторизация)
 - django-filter (фильтрация платежей)
+- stripe (оплата курсов)
 - PostgreSQL 14+
 - psycopg2-binary
 - Pillow (для `ImageField`: preview, avatar)
@@ -17,27 +19,42 @@ Django + Django REST Framework проект для онлайн-обучения
 
 ```
 platfom_online_learning/
-├── config/                 # настройки Django
+├── config/
 │   ├── settings.py
 │   ├── urls.py
 │   └── wsgi.py / asgi.py
-├── lms/                    # приложение LMS: курсы и уроки
+├── lms/
 │   ├── migrations/
 │   ├── fixtures/
-│   ├── models.py           # Course, Lesson
-│   ├── serializers.py      # CourseSerializer, LessonSerializer, PaymentSerializer, UserSerializer, UserPaymentSerializer
-│   ├── views.py            # CourseViewSet, Lesson*APIView, PaymentListAPIView, User*APIView
-│   ├── urls.py             # маршруты приложения
+│   ├── management/
+│   │   └── commands/
+│   │       └── create_moderators_group.py
+│   ├── services/
+│   │   └── stripe_service.py
+│   ├── tests/
+│   │   ├── __init__.py
+│   │   ├── test_lessons_crud.py
+│   │   └── test_subscriptions.py
+│   ├── models.py            # Course, Lesson, Subscription
+│   ├── serializers.py
+│   ├── views.py
+│   ├── urls.py
+│   ├── permissions.py
+│   ├── paginators.py
+│   ├── validators.py
 │   └── admin.py
-├── users/                  # приложение пользователей и платежей
+├── users/
 │   ├── migrations/
 │   ├── fixtures/
-│   │   └── payments.json   # фикстура платежей
-│   ├── models.py           # User, Payment
+│   │   └── payments.json
+│   ├── management/
+│   │   └── commands/
+│   │       └── seed_users.py
+│   ├── models.py            # User, Payment
 │   └── admin.py
-├── media/                  # загруженные файлы (preview, avatar) — в .gitignore
-├── .env                    # локальные секреты — в .gitignore
-├── .env.example            # шаблон переменных окружения
+├── media/                   # загруженные файлы — в .gitignore
+├── .env                     # локальные секреты — в .gitignore
+├── .env.example
 ├── .gitignore
 ├── manage.py
 ├── requirements.txt
@@ -46,9 +63,9 @@ platfom_online_learning/
 
 ## Требования
 
-- **Python** 3.11 или выше
-- **PostgreSQL** 14 или выше (запущенный сервер)
-- **pip** и **venv** (идут с Python)
+- **Python** 3.11+
+- **PostgreSQL** 14+
+- **Аккаунт Stripe** (для оплаты): https://dashboard.stripe.com/register
 
 Проверка версий:
 
@@ -62,11 +79,11 @@ psql --version
 ### 1. Клонировать репозиторий
 
 ```bash
-git clone <https://github.com/Aleksei-Pavlovskii/platfom_online_learning.git>
+git clone <url-репозитория>
 cd platfom_online_learning
 ```
 
-### 2. Создать и активировать виртуальное окружение
+### 2. Виртуальное окружение
 
 **Windows (PowerShell):**
 
@@ -79,13 +96,6 @@ python -m venv .venv
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
-
-**Windows (cmd):**
-
-```cmd
-python -m venv .venv
-.venv\Scripts\activate.bat
 ```
 
 **Linux / macOS:**
@@ -102,11 +112,9 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> `requirements.txt` должен быть в кодировке **UTF-8** (без BOM). Если pip ругается на `UnicodeDecodeError` — пересохраните файл в UTF-8.
+> `requirements.txt` должен быть в кодировке **UTF-8** (без BOM). Иначе `pip` упадёт с `UnicodeDecodeError`.
 
 ### 4. Создать базу данных PostgreSQL
-
-Подключитесь к серверу PostgreSQL (`psql -U postgres`) и выполните:
 
 ```sql
 CREATE DATABASE lms_db;
@@ -123,19 +131,12 @@ GRANT ALL PRIVILEGES ON DATABASE lms_db TO lms_user;
 
 Скопируйте шаблон:
 
-**Windows:**
-
 ```powershell
-copy .env.example .env
+copy .env.example .env        # Windows
+cp .env.example .env          # Linux/macOS
 ```
 
-**Linux / macOS:**
-
-```bash
-cp .env.example .env
-```
-
-Откройте `.env` и заполните значения:
+Заполните `.env`:
 
 ```env
 SECRET_KEY=change-me-to-a-long-random-string
@@ -146,17 +147,24 @@ DB_USER=postgres
 DB_PASSWORD=your_password
 DB_HOST=127.0.0.1
 DB_PORT=5432
+
+# Stripe (тестовые ключи с https://dashboard.stripe.com/test/apikeys)
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
+STRIPE_SUCCESS_URL=http://127.0.0.1:8000/payment/success/?session_id={CHECKOUT_SESSION_ID}
+STRIPE_CANCEL_URL=http://127.0.0.1:8000/payment/cancel/
 ```
 
-> ⚠️ Если в `settings.py` используются имена `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT` — переименуйте их в `DB_*`. Имена `USER` и `NAME` конфликтуют со стандартными переменными окружения ОС и могут привести к неожиданному подключению.
+> ⚠️ Если в `settings.py` используются имена `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT` — переименуйте в `DB_*`. Имена `USER` и `NAME` конфликтуют с переменными окружения ОС.
 
-### 6. Применить миграции
+### 6. Миграции
 
 ```bash
+python manage.py makemigrations
 python manage.py migrate
 ```
 
-### 7. Создать суперпользователя
+### 7. Суперпользователь
 
 ```bash
 python manage.py createsuperuser
@@ -164,26 +172,21 @@ python manage.py createsuperuser
 
 Будут запрошены: `Email`, `First name`, `Last name`, `Password` (модель `User` использует email как логин).
 
-### 8. Загрузить тестовые данные (опционально)
+### 8. Тестовые данные (опционально)
 
-Фикстура платежей требует существующих пользователей, курса и уроков. Создайте их:
-
-**Пользователи (3 шт.):**
+**Группа модераторов с правами:**
 
 ```bash
-python manage.py shell
+python manage.py create_moderators_group
 ```
 
-```python
-from django.contrib.auth import get_user_model
-User = get_user_model()
-User.objects.create_user(email='admin@example.com', password='testpass123', first_name='Иван', last_name='Иванов', is_staff=True, is_superuser=True)
-User.objects.create_user(email='student1@example.com', password='testpass123', first_name='Пётр', last_name='Петров')
-User.objects.create_user(email='student2@example.com', password='testpass123', first_name='Анна', last_name='Сидорова')
-exit()
+**Пользователи:**
+
+```bash
+python manage.py seed_users
 ```
 
-**Курс и уроки:**
+**Курс и уроки** (если нет):
 
 ```bash
 python manage.py shell
@@ -197,53 +200,74 @@ Lesson.objects.create(course=c, title='Переменные', description='Вт�
 exit()
 ```
 
-**Платежи:**
+**Платежи (фикстура):**
 
 ```bash
 python manage.py loaddata payments
 ```
 
-Ожидаемый вывод:
+> Если `loaddata payments` падает с `ForeignKeyViolation` — проверьте `pk` пользователей/курса/уроков и поправьте `users/fixtures/payments.json`.
 
-```
-Installed 4 object(s) from 1 fixture(s)
-```
-
-> Если `loaddata payments` падает с `ForeignKeyViolation` — проверьте, что `pk` пользователей/курса/уроков в фикстуре совпадают с реальными `pk` в БД:
-> ```python
-> from django.contrib.auth import get_user_model
-> from lms.models import Course, Lesson
-> print(list(get_user_model().objects.values_list('pk', 'email')))
-> print(list(Course.objects.values_list('pk', 'title')))
-> print(list(Lesson.objects.values_list('pk', 'title')))
-> ```
-> Поправьте `user`/`course`/`lesson` в `users/fixtures/payments.json` под реальные `pk`.
-
-### 9. Запустить сервер разработки
+### 9. Запуск
 
 ```bash
 python manage.py runserver
 ```
 
-Проект доступен по адресу: <http://127.0.0.1:8000/>
-
-Админка: <http://127.0.0.1:8000/admin/>
+- API: http://127.0.0.1:8000/
+- Админка: http://127.0.0.1:8000/admin/
 
 ## Переменные окружения
 
-Все переменные читаются из `.env` в корне проекта (через `python-dotenv`).
+| Переменная | Обязательна | Описание |
+|---|---|---|
+| `SECRET_KEY` | ✅ | секретный ключ Django |
+| `DEBUG` | ⛔ | `True` / `False` |
+| `DB_NAME` | ✅ | имя БД PostgreSQL |
+| `DB_USER` | ✅ | пользователь БД |
+| `DB_PASSWORD` | ✅ | пароль БД |
+| `DB_HOST` | ✅ | хост PostgreSQL |
+| `DB_PORT` | ✅ | порт PostgreSQL |
+| `STRIPE_SECRET_KEY` | ✅ (для оплаты) | секретный ключ Stripe (`sk_test_...`) |
+| `STRIPE_PUBLISHABLE_KEY` | ✅ (для оплаты) | публичный ключ Stripe (`pk_test_...`) |
+| `STRIPE_SUCCESS_URL` | ✅ (для оплаты) | URL после успешной оплаты |
+| `STRIPE_CANCEL_URL` | ✅ (для оплаты) | URL после отмены оплаты |
 
-| Переменная | Обязательна | Описание | Пример |
-|---|---|---|---|
-| `SECRET_KEY` | ✅ | секретный ключ Django | `django-insecure-...` |
-| `DEBUG` | ⛔ | режим отладки | `True` / `False` |
-| `DB_NAME` | ✅ | имя базы данных PostgreSQL | `lms_db` |
-| `DB_USER` | ✅ | пользователь БД | `postgres` |
-| `DB_PASSWORD` | ✅ | пароль пользователя БД | `your_password` |
-| `DB_HOST` | ✅ | хост PostgreSQL | `127.0.0.1` |
-| `DB_PORT` | ✅ | порт PostgreSQL | `5432` |
+`.env` **не коммитится**. В репозитории — только `.env.example`.
 
-Файл `.env` **не коммитится** в репозиторий (см. `.gitignore`). В репозитории хранится только `.env.example` с плейсхолдерами.
+## Аутентификация (JWT)
+
+Эндпоинты для получения токенов **открыты** (без авторизации):
+
+| Метод | URL | Что делает |
+|---|---|---|
+| POST | `/api/token/` | получить `access` + `refresh` по email/паролю |
+| POST | `/api/token/refresh/` | обновить `access` по `refresh` |
+| POST | `/register/` | регистрация пользователя |
+
+Все остальные эндпоинты требуют заголовок:
+
+```
+Authorization: Bearer <access_token>
+```
+
+**Пример логина:**
+
+```http
+POST /api/token/
+Content-Type: application/json
+
+{"email": "admin@example.com", "password": "testpass123"}
+```
+
+→ `200 OK`:
+
+```json
+{
+    "access": "eyJ...",
+    "refresh": "eyJ..."
+}
+```
 
 ## API — эндпоинты
 
@@ -253,64 +277,64 @@ python manage.py runserver
 
 | Метод | URL | Действие |
 |---|---|---|
-| GET | `/courses/` | список курсов (с `count_lessons` и `lessons`) |
+| GET | `/courses/` | список курсов (пагинация, `count_lessons`, `lessons`, `is_subscribed`) |
 | POST | `/courses/` | создать курс |
 | GET | `/courses/{id}/` | получить курс |
-| PUT | `/courses/{id}/` | обновить курс |
-| PATCH | `/courses/{id}/` | частично обновить курс |
+| PUT/PATCH | `/courses/{id}/` | обновить курс |
 | DELETE | `/courses/{id}/` | удалить курс |
 
-**Пример создания курса:**
-
-```http
-POST /courses/
-Content-Type: application/json
-
-{
-    "title": "Python для начинающих",
-    "description": "Базовый курс по Python"
-}
-```
+**Права:** модератор — просмотр/редактирование любых, без создания/удаления; владелец — полный доступ к своим; остальные — только свои (через `get_queryset`).
 
 **Пример ответа `GET /courses/`:**
 
 ```json
-[
-    {
-        "id": 1,
-        "title": "Алгебра",
-        "preview": null,
-        "description": "Базовый курс",
-        "count_lessons": 2,
-        "lessons": [
-            {"id": 2, "course": 1, "title": "Введение", "description": "Первый урок", "preview": null, "video_url": ""},
-            {"id": 3, "course": 1, "title": "Переменные", "description": "Второй урок", "preview": null, "video_url": ""}
-        ]
-    }
-]
+{
+    "count": 1,
+    "next": null,
+    "previous": null,
+    "results": [
+        {
+            "id": 1,
+            "title": "Алгебра",
+            "description": "Базовый курс",
+            "preview": null,
+            "count_lessons": 2,
+            "is_subscribed": true,
+            "lessons": [
+                {"id": 2, "course": 1, "title": "Введение", "description": "...", "preview": null, "video_url": ""},
+                {"id": 3, "course": 1, "title": "Переменные", "description": "...", "preview": null, "video_url": ""}
+            ]
+        }
+    ]
+}
 ```
 
 ### Уроки (Generic-классы)
 
 | Метод | URL | Действие |
 |---|---|---|
-| GET | `/lessons/` | список уроков |
-| POST | `/lessons/create/` | создать урок |
+| GET | `/lessons/` | список уроков (пагинация) |
+| POST | `/lessons/create/` | создать урок (только в **свой** курс) |
 | GET | `/lessons/{id}/` | получить урок |
-| PUT | `/lessons/{id}/update/` | обновить урок |
+| PUT/PATCH | `/lessons/{id}/update/` | обновить урок |
 | DELETE | `/lessons/{id}/delete/` | удалить урок |
+
+**Права:** как у курсов. При создании `owner` ставится автоматически из `request.user`. Если `course` не принадлежит текущему пользователю → `403`.
+
+**Валидация `video_url`:** разрешены только ссылки на `youtube.com` / `youtu.be` (см. `lms/validators.py`). Ссылки на другие ресурсы → `400`.
 
 **Пример создания урока:**
 
 ```http
 POST /lessons/create/
+Authorization: Bearer <access>
 Content-Type: application/json
 
 {
     "course": 1,
     "title": "Введение",
     "description": "Первый урок",
-    "video_url": "https://example.com/video"
+    "video_url": "https://www.youtube.com/watch?v=abc123"
 }
 ```
 
@@ -319,28 +343,8 @@ Content-Type: application/json
 | Метод | URL | Действие |
 |---|---|---|
 | GET | `/users/{id}/` | получить профиль |
-| PUT | `/users/{id}/` | полностью обновить профиль |
-| PATCH | `/users/{id}/` | частично обновить профиль |
-
-**Пример частичного обновления:**
-
-```http
-PATCH /users/1/
-Content-Type: application/json
-
-{
-    "first_name": "Иван",
-    "city": "Москва"
-}
-```
-
-> Поле `password` через API профиля не редактируется. Для смены пароля предусмотрен отдельный эндпоинт (в текущей версии не реализован).
-
-### История платежей в профиле
-
-| Метод | URL                     | Действие |
-|---|-------------------------|---|
-| GET | `/users/{pk}/payments/` | профиль + история платежей |
+| PUT/PATCH | `/users/{id}/` | обновить профиль |
+| GET | `/users/{id}/payments/` | профиль + история платежей |
 
 **Пример ответа `GET /users/1/payments/`:**
 
@@ -354,189 +358,243 @@ Content-Type: application/json
     "city": null,
     "avatar": null,
     "payments": [
-        {
-            "id": 3,
-            "user": 1,
-            "paid_at": "2026-11-10T09:15:00+03:00",
-            "course": null,
-            "lesson": 2,
-            "amount": "490.00",
-            "payment_method": "transfer"
-        },
-        {
-            "id": 1,
-            "user": 1,
-            "paid_at": "2026-11-01T10:00:00+03:00",
-            "course": 1,
-            "lesson": null,
-            "amount": "4990.00",
-            "payment_method": "transfer"
-        }
+        {"id": 3, "paid_at": "2026-11-10T09:15:00+03:00", "course": null, "lesson": 2, "amount": "490.00", "payment_method": "transfer"}
     ]
 }
 ```
-
-> Если у вас старый маршрут `user/{id}/` — он тоже работает, но рекомендуется `users/{id}/payments/`.
 
 ### Платежи (список с фильтрацией и сортировкой)
 
 | Метод | URL | Действие |
 |---|---|---|
-| GET | `/payments/` | список платежей (с фильтрацией и сортировкой) |
+| GET | `/payments/` | список платежей |
 
-**Параметры запроса:**
+**Параметры:**
 
 | Параметр | Пример | Описание |
 |---|---|---|
-| `ordering` | `?ordering=paid_at` или `?ordering=-paid_at` | сортировка по дате оплаты |
+| `ordering` | `?ordering=paid_at` / `?ordering=-paid_at` | сортировка по дате |
 | `course` | `?course=1` | фильтр по курсу |
 | `lesson` | `?lesson=2` | фильтр по уроку |
-| `payment_method` | `?payment_method=cash` / `transfer` | фильтр по способу оплаты |
+| `payment_method` | `?payment_method=cash` / `transfer` / `stripe` | фильтр по способу |
 
-**Примеры:**
+### Подписка на обновления курса
 
-```
-GET /payments/
-GET /payments/?ordering=-paid_at
-GET /payments/?course=1
-GET /payments/?lesson=2
-GET /payments/?payment_method=cash
-GET /payments/?payment_method=transfer&ordering=paid_at
-```
+| Метод | URL | Действие |
+|---|---|---|
+| POST | `/subscriptions/` | toggle: есть подписка — удаляет, нет — создаёт |
 
-**Пример ответа:**
+**Тело:**
 
 ```json
-[
-    {
-        "id": 4,
-        "user": 3,
-        "paid_at": "2026-11-12T18:45:00+03:00",
-        "course": null,
-        "lesson": 3,
-        "amount": "490.00",
-        "payment_method": "cash"
-    },
-    {
-        "id": 2,
-        "user": 2,
-        "paid_at": "2026-11-05T14:30:00+03:00",
-        "course": 1,
-        "lesson": null,
-        "amount": "4990.00",
-        "payment_method": "cash"
-    }
-]
+{"course_id": 1}
+```
+
+**Ответ:**
+
+```json
+{"message": "Подписка добавлена", "subscribed": true}
+```
+
+При повторном вызове с тем же `course_id`:
+
+```json
+{"message": "Подписка удалена", "subscribed": false}
+```
+
+Признак подписки текущего пользователя отдаётся в `CourseSerializer` как поле `is_subscribed`.
+
+### Оплата через Stripe
+
+| Метод | URL | Действие |
+|---|---|---|
+| POST | `/payments/create/` | создать продукт, цену, сессию в Stripe; сохранить `payment_url` |
+| GET | `/payments/{id}/status/` | проверить статус сессии в Stripe |
+| GET | `/payment/success/` | редирект после успешной оплаты |
+| GET | `/payment/cancel/` | редирект после отмены |
+
+**Пример создания платежа:**
+
+```http
+POST /payments/create/
+Authorization: Bearer <access>
+Content-Type: application/json
+
+{"course_id": 1}
+```
+
+→ `201 Created`:
+
+```json
+{
+    "payment_id": 1,
+    "amount": "4990.00",
+    "payment_url": "https://checkout.stripe.com/c/pay/cs_test_...",
+    "session_id": "cs_test_..."
+}
+```
+
+Откройте `payment_url` в браузере → страница Stripe → тестовая карта:
+
+| Поле | Значение |
+|---|---|
+| Номер карты | `4242 4242 4242 4242` |
+| Дата | любая будущая (например `12/34`) |
+| CVC | любые 3 цифры (например `123`) |
+
+После оплаты — редирект на `STRIPE_SUCCESS_URL`.
+
+**Проверка статуса:**
+
+```http
+GET /payments/1/status/
+Authorization: Bearer <access>
+```
+
+→ `200 OK`:
+
+```json
+{
+    "payment_id": 1,
+    "stripe_status": "complete",
+    "stripe_payment_status": "paid",
+    "paid_at": "2026-11-26T10:00:00+03:00"
+}
+```
+
+**Сервисные функции** — в `lms/services/stripe_service.py`:
+
+- `create_stripe_product(name, description)` → dict
+- `create_stripe_price(product_id, amount, currency)` → dict (сумма **в центах**)
+- `create_stripe_checkout_session(price_id, success_url, cancel_url, metadata)` → dict
+- `retrieve_stripe_session(session_id)` → dict
+
+> ⚠️ Сумма передаётся в минимальных единицах: `49.90 usd` → `int(Decimal('49.90') * 100)` = `4990` центов. Валюта — `usd` (бизнес в США).
+
+## Права доступа
+
+### Группа `Moderators`
+
+Создаётся командой:
+
+```bash
+python manage.py create_moderators_group
+```
+
+Права: `view`/`change` для `Course` и `Lesson` (без `add`/`delete`).
+
+Назначение пользователя в группу — **через админку**: `/admin/users/user/` → пользователь → блок **Groups** → добавить `Moderators` → Save.
+
+### Permission-классы (`lms/permissions.py`)
+
+| Класс | Что делает |
+|---|---|
+| `IsModerator` | модератор: `GET`/`PUT`/`PATCH` — можно, `POST`/`DELETE` — нельзя |
+| `IsOwner` | только владелец объекта |
+| `IsModeratorOrOwner` | модератор: просмотр/редактирование; владелец: полный доступ к своим; остальные: 403/404 |
+| `IsProfileOwnerOrAdmin` | профиль — только владелец или админ |
+
+### Матрица доступа
+
+| Роль | GET | POST | PUT/PATCH | DELETE |
+|---|---|---|---|---|
+| Аноним | 401 | 401 | 401 | 401 |
+| Авторизованный (не модератор) | свои объекты | ✅ (создаёт свои) | свои объекты | свои объекты |
+| **Модератор** | все | **403** | все | **403** |
+| Админ (`is_staff`) | все | все | все | все |
+
+## Пагинация
+
+`lms/paginators.py`:
+
+```python
+class LmsPaginator(PageNumberPagination):
+    page_size = 5
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+```
+
+Применяется к `CourseViewSet` и `LessonListAPIView`.
+
+**Параметры:**
+
+- `?page=2` — номер страницы
+- `?page_size=10` — размер страницы (макс. 50)
+- `?page=999` — `404 Not Found`
+
+## Валидация ссылок
+
+`lms/validators.py` — `YouTubeUrlValidator` разрешает только `youtube.com` / `youtu.be`. Интегрирован в `LessonSerializer.Meta.validators`.
+
+```python
+class LessonSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Lesson
+        fields = '__all__'
+        read_only_fields = ['owner']
+        validators = [YouTubeUrlValidator(field='video_url')]
 ```
 
 ## Модели
 
-### `User` (кастомная, приложение `users`)
+### `User` (`users`)
 
-Наследуется от `AbstractBaseUser` + `PermissionsMixin`.
+Наследуется от `AbstractBaseUser` + `PermissionsMixin`. `USERNAME_FIELD = 'email'`, `REQUIRED_FIELDS = ['first_name', 'last_name']`. Управляется `UserManager`. Пароль хэшируется через `set_password()`.
 
-| Поле | Тип | Примечание |
-|---|---|---|
-| `email` | `EmailField` | `unique=True`, `USERNAME_FIELD` |
-| `first_name` | `CharField(20)` | `REQUIRED_FIELDS` |
-| `last_name` | `CharField(30)` | `REQUIRED_FIELDS` |
-| `phone` | `CharField(20)` | необязательное |
-| `city` | `CharField(30)` | необязательное |
-| `avatar` | `ImageField` | необязательное |
-| `is_active` | `BooleanField` | по умолчанию `True` |
-| `is_staff` | `BooleanField` | по умолчанию `False` |
+### `Course` (`lms`)
 
-Управляется через `UserManager` (`create_user`, `create_superuser`). Пароль хэшируется через `set_password()`.
+`title`, `preview`, `description`, `owner` (FK на `User`, `related_name='courses'`).
 
-### `Course` (приложение `lms`)
+### `Lesson` (`lms`)
 
-| Поле | Тип |
-|---|---|
-| `title` | `CharField(100)` |
-| `preview` | `ImageField` (необязательное) |
-| `description` | `TextField` |
+`course` (FK, `related_name='lessons'`), `title`, `description`, `preview`, `video_url`, `owner` (FK, `related_name='lessons'`).
 
-Сортировка: по `title`.
+### `Subscription` (`lms`)
 
-### `Lesson` (приложение `lms`)
+`user` (FK), `course` (FK), `created_at`. `UniqueConstraint(user, course)` — нельзя подписаться дважды.
+
+### `Payment` (`users`)
 
 | Поле | Тип | Примечание |
 |---|---|---|
-| `course` | `ForeignKey(Course)` | `on_delete=CASCADE`, `related_name='lessons'` |
-| `title` | `CharField(200)` | |
-| `description` | `TextField` | необязательное |
-| `preview` | `ImageField` | необязательное |
-| `video_url` | `URLField(500)` | необязательное |
+| `user` | FK | `related_name='payments'` |
+| `paid_at` | DateTimeField | `null=True, blank=True` — проставляется после оплаты |
+| `course` | FK | `null=True, blank=True` |
+| `lesson` | FK | `null=True, blank=True` |
+| `amount` | DecimalField(10, 2) | `MinValueValidator(0.01)` |
+| `payment_method` | CharField | choices: `cash` / `transfer` / `stripe` |
+| `stripe_product_id` | CharField | ID продукта в Stripe |
+| `stripe_price_id` | CharField | ID цены в Stripe |
+| `stripe_session_id` | CharField | ID сессии в Stripe |
+| `payment_url` | URLField | ссылка на оплату |
 
-### `Payment` (приложение `users`)
+Правило: платёж за **курс** или **урок** (XOR, через `CheckConstraint`).
 
-| Поле | Тип | Примечание |
-|---|---|---|
-| `user` | `ForeignKey(AUTH_USER_MODEL)` | `on_delete=CASCADE`, `related_name='payments'` |
-| `paid_at` | `DateTimeField` | дата и время оплаты |
-| `course` | `ForeignKey(Course)` | `null=True, blank=True`, `related_name='payments'` |
-| `lesson` | `ForeignKey(Lesson)` | `null=True, blank=True`, `related_name='payments'` |
-| `amount` | `DecimalField(10, 2)` | `MinValueValidator(0.01)` |
-| `payment_method` | `CharField(20)` | choices: `cash` / `transfer` |
-
-Правило: платёж относится **либо** к курсу, **либо** к уроку (XOR). Может быть ограничено `CheckConstraint` на уровне БД.
-
-Сортировка: `-paid_at` (свежие сверху).
-
-## Проверка работоспособности
-
-### Через браузер
-
-- <http://127.0.0.1:8000/admin/> — админка (после `createsuperuser`)
-- <http://127.0.0.1:8000/courses/> — список курсов (JSON)
-- <http://127.0.0.1:8000/lessons/> — список уроков (JSON)
-- <http://127.0.0.1:8000/payments/> — список платежей (JSON)
-- <http://127.0.0.1:8000/users/1/payments/> — профиль с платежами
-
-### Через curl
+## Тесты
 
 ```bash
-# Список курсов
-curl http://127.0.0.1:8000/courses/
-
-# Создать курс
-curl -X POST http://127.0.0.1:8000/courses/ \
-  -H "Content-Type: application/json" \
-  -d "{\"title\": \"Python\", \"description\": \"Базовый курс\"}"
-
-# Создать урок
-curl -X POST http://127.0.0.1:8000/lessons/create/ \
-  -H "Content-Type: application/json" \
-  -d "{\"course\": 1, \"title\": \"Введение\"}"
-
-# Список платежей с фильтрацией
-curl "http://127.0.0.1:8000/payments/?payment_method=cash&ordering=-paid_at"
+python manage.py test lms
 ```
 
-### Через Postman
+Покрытие:
 
-1. Создайте коллекцию `LMS`.
-2. Добавьте запросы из таблиц выше.
-3. Для POST/PUT/PATCH — `Body → raw → JSON`.
+- **CRUD уроков** (`test_lessons_crud.py`) — владелец / чужой / модератор / аноним; list / retrieve / create / update / delete.
+- **Подписка** (`test_subscriptions.py`) — toggle, 404, 401, `is_subscribed` true/false/чужой.
+- Аутентификация — через `self.client.force_authenticate(user=...)`.
 
-## Запуск с чистого окружения (проверка)
+Ожидаемо: `Ran 25 tests ... OK`.
 
-Чтобы убедиться, что проект поднимается «с нуля»:
+## Запуск с чистого окружения
 
 ```bash
-# 1. Новый venv
 python -m venv .venv-test
 .\.venv-test\Scripts\Activate.ps1     # Windows
 # source .venv-test/bin/activate       # Linux/macOS
 
-# 2. Установка зависимостей
 pip install -r requirements.txt
-
-# 3. Настройка .env
 copy .env.example .env
 # отредактировать .env
 
-# 4. Миграции и запуск
 python manage.py migrate
 python manage.py runserver
 ```
@@ -547,56 +605,25 @@ python manage.py runserver
 
 ### `ModuleNotFoundError: No module named 'django-filter'`
 
-Пакет не установлен или неверно указан в `INSTALLED_APPS`.
-
 ```bash
 pip install django-filter
 ```
 
-В `settings.py`:
-
-```python
-INSTALLED_APPS = [
-    ...
-    'django_filters',   # ← подчёркивание, не дефис
-]
-```
-
-И в `REST_FRAMEWORK` **не должно быть** `...` (Ellipsis):
-
-```python
-REST_FRAMEWORK = {
-    'DEFAULT_FILTER_BACKENDS': (
-        'django_filters.rest_framework.DjangoFilterBackend',
-        'rest_framework.filters.OrderingFilter',
-    ),
-}
-```
+В `settings.py` — `'django_filters'` (подчёркивание, не дефис).
 
 ### `AttributeError: 'ellipsis' object has no attribute 'rsplit'`
 
-В `DEFAULT_FILTER_BACKENDS` осталось многоточие `...`. Уберите его — это не «пропуск», а объект `Ellipsis`, который DRF пытается импортировать как backend.
+В `DEFAULT_FILTER_BACKENDS` осталось `...`. Уберите.
 
 ### `UnicodeDecodeError` при `pip install -r requirements.txt`
 
-`requirements.txt` сохранён в UTF-16 (типично для PowerShell). Пересохраните файл в **UTF-8 без BOM**:
+`requirements.txt` в UTF-16. Пересохраните в UTF-8 без BOM (PyCharm: Convert → UTF-8).
 
-- **PyCharm:** внизу справа кликните на кодировку → *Convert → UTF-8*.
-- **PowerShell:** `[System.IO.File]::WriteAllLines("$PWD\requirements.txt", (Get-Content .\requirements.txt -Encoding Unicode), [System.Text.UTF8Encoding]::new($false))`
-
-### `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xc2` при подключении к PostgreSQL
-
-Проблема кодировки клиента. Попробуйте:
+### `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xc2` (PostgreSQL)
 
 ```bash
 pip uninstall psycopg2 psycopg2-binary
 pip install "psycopg[binary]"
-```
-
-Или добавьте в `settings.py`:
-
-```python
-DATABASES['default']['OPTIONS'] = {'options': '-c client_encoding=utf8'}
 ```
 
 ### `Cannot use ImageField because Pillow is not installed`
@@ -605,79 +632,60 @@ DATABASES['default']['OPTIONS'] = {'options': '-c client_encoding=utf8'}
 pip install Pillow
 ```
 
-### `django.db.utils.OperationalError: could not connect to server`
-
-- Проверьте, что PostgreSQL запущен.
-- Проверьте `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` в `.env`.
-- Убедитесь, что БД `lms_db` создана (`CREATE DATABASE lms_db;`).
-
-### `InconsistentMigrationHistory` после смены `AUTH_USER_MODEL`
-
-Если БД создавалась со стандартной `auth.User`, а потом вы подключили кастомную — пересоздайте БД:
-
-```bash
-# удалить db.sqlite3 (если SQLite) или DROP DATABASE lms_db; CREATE DATABASE lms_db;
-python manage.py makemigrations
-python manage.py migrate
-```
-
 ### `models.E015: 'ordering' refers to the nonexistent field 'order'`
 
-В `Meta.ordering` указано поле, которого нет в модели. Проверьте, что все имена в `ordering` реально существуют (например, `paid_at`, а не `payment_at`).
+В `Meta.ordering` указано несуществующее поле. Проверьте имена.
 
-### `loaddata payments`: `ForeignKeyViolation: Ключ (lesson_id)=(1) отсутствует в таблице`
+### `loaddata payments`: `ForeignKeyViolation`
 
-Фикстура ссылается на несуществующий `pk`. Проверьте реальные `pk` пользователей, курсов и уроков и поправьте `users/fixtures/payments.json`:
-
-```python
-from django.contrib.auth import get_user_model
-from lms.models import Course, Lesson
-print(list(get_user_model().objects.values_list('pk', 'email')))
-print(list(Course.objects.values_list('pk', 'title')))
-print(list(Lesson.objects.values_list('pk', 'title')))
-```
+Фикстура ссылается на несуществующий `pk`. Проверьте `pk` в БД и поправьте `payments.json`.
 
 ### `loaddata payments`: `Invalid model identifier: lms.payment`
 
-Модель `Payment` находится в приложении `users`. В фикстуре должно быть:
+Модель `Payment` в `users` → `"model": "users.payment"`.
 
-```json
-"model": "users.payment"
-```
+### `IntegrityError: значение NULL в столбце "paid_at"`
 
-### `RuntimeWarning: DateTimeField Payment.paid_at received a naive datetime`
+`paid_at` — `NOT NULL`, а view не передаёт дату. Сделайте `paid_at = DateTimeField(null=True, blank=True)` и проставляйте после оплаты.
 
-В фикстуре `paid_at` указан без времени/зоны (`"2026-11-01"`), а поле — `DateTimeField` при `USE_TZ=True`. Используйте ISO с часовым поясом:
+### `404` на `/payment/success/`
 
-```json
-"paid_at": "2026-11-01T10:00:00+03:00"
-```
+Нет маршрута. Добавьте `path('payment/success/', ...)` в `config/urls.py` (или `lms/urls.py`).
 
-Или смените тип поля на `DateField`, если достаточно только даты.
+### `NoReverseMatch: 'course-detail' / 'course-subscribe'`
+
+`basename` в роутере — `course` (единственное число). Имя подписки — `subscription-toggle`, если URL `subscriptions/` с `course_id` в теле.
+
+### Stripe API недоступен из РФ
+
+- VPN/прокси на уровне сети.
+- `stripe.proxy = 'http://user:pass@proxy-host:port'` в `stripe_service.py`.
+- Деплой на сервер вне РФ (Railway, Render, VPS в Европе/США).
 
 ## Полезные команды
 
 ```bash
-# Создать миграции
+# Миграции
 python manage.py makemigrations
-
-# Применить миграции
 python manage.py migrate
 
-# Откатить последнюю миграцию приложения
-python manage.py migrate lms zero
-
-# Создать суперпользователя
+# Суперпользователь
 python manage.py createsuperuser
 
-# Загрузить фикстуру
+# Группа модераторов
+python manage.py create_moderators_group
+
+# Тестовые пользователи
+python manage.py seed_users
+
+# Фикстура платежей
 python manage.py loaddata payments
 
-# Открыть Django shell
-python manage.py shell
+# Тесты
+python manage.py test lms
 
-# Собрать статику (для production)
-python manage.py collectstatic
+# Shell
+python manage.py shell
 ```
 
 ## Лицензия
