@@ -5,7 +5,8 @@ from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, OpenApiParameter
 from rest_framework import viewsets, generics, status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import OrderingFilter
@@ -18,6 +19,7 @@ from lms.paginators import LmsPaginator
 from lms.permissions import IsModeratorOrOwner, IsProfileOwnerOrAdmin
 from lms.serializers import CourseSerializer, LessonSerializer, UserSerializer, PaymentSerializer, UserPaymentSerializer
 from users.models import Payment
+from lms.tasks import send_course_update_email
 
 
 class CourseViewSet(viewsets.ModelViewSet):
@@ -36,6 +38,11 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+
+    def perform_update(self, serializer):
+        course = serializer.save()
+        send_course_update_email.delay(course.id)
 
 
 class LessonBaseAPIView(generics.GenericAPIView):
@@ -77,18 +84,30 @@ User = get_user_model()
 
 
 class UserRetrieveUpdateAPIView(generics.RetrieveUpdateAPIView):
-    queryset = User.objects.all()
     serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated, IsProfileOwnerOrAdmin]
 
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return User.objects.all()
+        return User.objects.filter(pk=self.request.user.pk)
 
 class PaymentListAPIView(generics.ListAPIView):
     serializer_class = PaymentSerializer
     queryset = Payment.objects.all()
 
+
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['course', 'lesson', 'payment_method']
     ordering_fields = ('paid_at',)
     ordering = ['-paid_at']
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_staff:
+            return Payment.objects.all()
+        return Payment.objects.filter(user=user)
 
 
 class UserPaymentRetrieveAPIView(generics.RetrieveAPIView):
@@ -175,7 +194,7 @@ class PaymentCreateAPIView(APIView):
         price = create_stripe_price(
             product_id=product['id'],
             amount=int(amount * 100),
-            currency='usd',
+            currency=settings.STRIPE_CURRENCY,
         )
 
         # 3. Сессия
@@ -205,6 +224,26 @@ class PaymentCreateAPIView(APIView):
 class PaymentStatusAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        summary='Статус платежа',
+        description='Получает статус Stripe-сессии и синхронизирует paid_at в локальной модели.',
+        parameters=[
+            OpenApiParameter('pk', OpenApiTypes.INT, OpenApiParameter.PATH, description='ID платежа'),
+        ],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'payment_id': {'type': 'integer'},
+                    'stripe_status': {'type': 'string', 'example': 'complete'},
+                    'stripe_payment_status': {'type': 'string', 'example': 'paid'},
+                    'paid_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                },
+            },
+            404: {'description': 'Платёж не найден'},
+        },
+    )
+
     def get(self, request, pk):
         payment = Payment.objects.filter(pk=pk, user=request.user).first()
         if not payment:
@@ -228,11 +267,14 @@ class PaymentStatusAPIView(APIView):
 class PaymentSuccessAPIView(APIView):
     permission_classes = [AllowAny]
 
-    @extend_schema(  # ← декоратор над методом
-        summary='Создать платёж через Stripe',
-        description='...',
-        request={...},
-        responses={...},
+    @extend_schema(
+        summary='Успешная оплата',
+        description='Callback после успешной оплаты Stripe. Синхронизирует paid_at.',
+        parameters=[
+            OpenApiParameter('session_id', OpenApiTypes.STR, OpenApiParameter.QUERY,
+                             description='ID Stripe-сессии', required=False),
+        ],
+        responses={200: {'description': 'Оплата успешна'}},
     )
 
     def get(self, request):
