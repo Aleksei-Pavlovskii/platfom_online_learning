@@ -49,9 +49,11 @@ class User(AbstractBaseUser, PermissionsMixin):
 class Payment(models.Model):
     CASH = 'cash'
     TRANSFER = 'transfer'
+    STRIPE = 'stripe'
     PAYMENT_METHOD_CHOICES = [
         (CASH, 'Наличные'),
         (TRANSFER, 'Перевод на счёт'),
+        (STRIPE, 'Stripe'),
     ]
 
     user = models.ForeignKey(

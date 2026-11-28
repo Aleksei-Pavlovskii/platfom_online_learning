@@ -13,12 +13,11 @@ def create_stripe_product(name: str, description: str = '') -> dict:
     return {'id': product.id, 'name': product.name}
 
 
-def create_stripe_price(product_id: str, amount: int, currency: str = 'usd') -> dict:
-    """Создаёт цену в Stripe."""
+def create_stripe_price(product_id: str, amount: int, currency: str = None) -> dict:
     price = stripe.Price.create(
         product=product_id,
         unit_amount=amount,
-        currency=currency,
+        currency=currency or settings.STRIPE_CURRENCY,
     )
     return {'id': price.id, 'unit_amount': price.unit_amount, 'currency': price.currency}
 

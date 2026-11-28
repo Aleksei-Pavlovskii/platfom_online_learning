@@ -3,7 +3,10 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, OpenApiParameter
 from rest_framework import viewsets, generics, status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import OrderingFilter
@@ -16,6 +19,7 @@ from lms.paginators import LmsPaginator
 from lms.permissions import IsModeratorOrOwner, IsProfileOwnerOrAdmin
 from lms.serializers import CourseSerializer, LessonSerializer, UserSerializer, PaymentSerializer, UserPaymentSerializer
 from users.models import Payment
+from lms.tasks import send_course_update_email
 
 
 class CourseViewSet(viewsets.ModelViewSet):
@@ -34,6 +38,11 @@ class CourseViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+
+    def perform_update(self, serializer):
+        course = serializer.save()
+        send_course_update_email.delay(course.id)
 
 
 class LessonBaseAPIView(generics.GenericAPIView):
@@ -75,18 +84,30 @@ User = get_user_model()
 
 
 class UserRetrieveUpdateAPIView(generics.RetrieveUpdateAPIView):
-    queryset = User.objects.all()
     serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated, IsProfileOwnerOrAdmin]
 
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return User.objects.all()
+        return User.objects.filter(pk=self.request.user.pk)
 
 class PaymentListAPIView(generics.ListAPIView):
     serializer_class = PaymentSerializer
     queryset = Payment.objects.all()
 
+
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['course', 'lesson', 'payment_method']
     ordering_fields = ('paid_at',)
     ordering = ['-paid_at']
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_staff:
+            return Payment.objects.all()
+        return Payment.objects.filter(user=user)
 
 
 class UserPaymentRetrieveAPIView(generics.RetrieveAPIView):
@@ -152,7 +173,7 @@ class PaymentCreateAPIView(APIView):
             item = Course.objects.filter(pk=course_id).first()
             if not item:
                 return Response({'error': 'Курс не найден.'}, status=404)
-            amount = Decimal('4990.00')  # ← цена курса (можно взять из модели)
+            amount = item.price
             item_name = f'Курс: {item.title}'
             item_description = item.description or ''
             payment = Payment(user=request.user, course=item, amount=amount)
@@ -161,7 +182,7 @@ class PaymentCreateAPIView(APIView):
             item = Lesson.objects.filter(pk=lesson_id).first()
             if not item:
                 return Response({'error': 'Урок не найден.'}, status=404)
-            amount = Decimal('490.00')
+            amount = item.price
             item_name = f'Урок: {item.title}'
             item_description = item.description or ''
             payment = Payment(user=request.user, lesson=item, amount=amount)
@@ -173,7 +194,7 @@ class PaymentCreateAPIView(APIView):
         price = create_stripe_price(
             product_id=product['id'],
             amount=int(amount * 100),
-            currency='usd',
+            currency=settings.STRIPE_CURRENCY,
         )
 
         # 3. Сессия
@@ -189,7 +210,7 @@ class PaymentCreateAPIView(APIView):
         payment.stripe_price_id = price['id']
         payment.stripe_session_id = session['id']
         payment.payment_url = session['url']
-        payment.payment_method = Payment.CASH
+        payment.payment_method = Payment.STRIPE
         payment.save()
 
         return Response({
@@ -201,8 +222,27 @@ class PaymentCreateAPIView(APIView):
 
 
 class PaymentStatusAPIView(APIView):
-    """GET /payments/<pk>/status/ — проверка статуса сессии в Stripe."""
     permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Статус платежа',
+        description='Получает статус Stripe-сессии и синхронизирует paid_at в локальной модели.',
+        parameters=[
+            OpenApiParameter('pk', OpenApiTypes.INT, OpenApiParameter.PATH, description='ID платежа'),
+        ],
+        responses={
+            200: {
+                'type': 'object',
+                'properties': {
+                    'payment_id': {'type': 'integer'},
+                    'stripe_status': {'type': 'string', 'example': 'complete'},
+                    'stripe_payment_status': {'type': 'string', 'example': 'paid'},
+                    'paid_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                },
+            },
+            404: {'description': 'Платёж не найден'},
+        },
+    )
 
     def get(self, request, pk):
         payment = Payment.objects.filter(pk=pk, user=request.user).first()
@@ -212,17 +252,55 @@ class PaymentStatusAPIView(APIView):
             return Response({'error': 'У платежа нет Stripe-сессии.'}, status=400)
 
         session_data = retrieve_stripe_session(payment.stripe_session_id)
+
+        if session_data['payment_status'] == 'paid' and not payment.paid_at:
+            payment.paid_at = timezone.now()
+            payment.save(update_fields=['paid_at'])
+
         return Response({
             'payment_id': payment.id,
             'stripe_status': session_data['status'],
             'stripe_payment_status': session_data['payment_status'],
+            'paid_at': payment.paid_at,
         })
 
 class PaymentSuccessAPIView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        summary='Успешная оплата',
+        description='Callback после успешной оплаты Stripe. Синхронизирует paid_at.',
+        parameters=[
+            OpenApiParameter('session_id', OpenApiTypes.STR, OpenApiParameter.QUERY,
+                             description='ID Stripe-сессии', required=False),
+        ],
+        responses={200: {'description': 'Оплата успешна'}},
+    )
+
     def get(self, request):
-        return Response({'message': 'Оплата прошла успешно!'})
+        session_id = request.query_params.get('session_id')
+        if not session_id:
+            return Response({'message': 'Оплата прошла успешно!'})
+
+        payment = Payment.objects.filter(stripe_session_id=session_id).first()
+        if not payment:
+            return Response({
+                'message': 'Оплата прошла успешно, но платёж не найден в системе.',
+                'session_id': session_id,
+            })
+
+        from lms.services.stripe_service import retrieve_stripe_session
+        session_data = retrieve_stripe_session(session_id)
+        if session_data['payment_status'] == 'paid' and not payment.paid_at:
+            payment.paid_at = timezone.now()
+            payment.save(update_fields=['paid_at'])
+
+        return Response({
+            'message': 'Оплата прошла успешно!',
+            'session_id': session_id,
+            'stripe_payment_status': session_data['payment_status'],
+            'paid_at': payment.paid_at,
+        })
 
 
 class PaymentCancelAPIView(APIView):
