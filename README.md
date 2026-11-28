@@ -1,6 +1,6 @@
 # LMS — платформа онлайн-обучения
 
-Django + Django REST Framework проект для онлайн-обучения: курсы, уроки, кастомная модель пользователя, платежи, подписка на обновления курса, оплата через Stripe, права доступа (модераторы / владельцы), фильтрация и сортировка, пагинация, тесты.
+Django + Django REST Framework проект для онлайн-обучения: курсы, уроки, кастомная модель пользователя, платежи, подписка на обновления курса, оплата через Stripe, права доступа (модераторы / владельцы), фильтрация и сортировка, пагинация, тесты, фоновые задачи (Celery + Redis), рассылка писем подписчикам, периодическая блокировка неактивных пользователей.
 
 ## Стек
 
@@ -9,10 +9,13 @@ Django + Django REST Framework проект для онлайн-обучения
 - Django REST Framework 3.15+
 - djangorestframework-simplejwt (JWT-авторизация)
 - django-filter (фильтрация платежей)
+- drf-spectacular (OpenAPI / Swagger / ReDoc)
 - stripe (оплата курсов)
+- celery + redis (фоновые задачи)
+- django-celery-beat (расписание задач)
 - PostgreSQL 14+
 - psycopg2-binary
-- Pillow (для `ImageField`: preview, avatar)
+- Pillow (для `ImageField`)
 - python-dotenv (для переменных окружения)
 
 ## Структура проекта
@@ -22,6 +25,8 @@ platfom_online_learning/
 ├── config/
 │   ├── settings.py
 │   ├── urls.py
+│   ├── celery.py
+│   ├── __init__.py
 │   └── wsgi.py / asgi.py
 ├── lms/
 │   ├── migrations/
@@ -34,7 +39,9 @@ platfom_online_learning/
 │   ├── tests/
 │   │   ├── __init__.py
 │   │   ├── test_lessons_crud.py
-│   │   └── test_subscriptions.py
+│   │   ├── test_subscriptions.py
+│   │   ├── test_stripe.py
+│   │   └── test_course_email.py
 │   ├── models.py            # Course, Lesson, Subscription
 │   ├── serializers.py
 │   ├── views.py
@@ -42,6 +49,7 @@ platfom_online_learning/
 │   ├── permissions.py
 │   ├── paginators.py
 │   ├── validators.py
+│   ├── tasks.py             # send_course_update_email
 │   └── admin.py
 ├── users/
 │   ├── migrations/
@@ -50,7 +58,10 @@ platfom_online_learning/
 │   ├── management/
 │   │   └── commands/
 │   │       └── seed_users.py
+│   ├── tests/
+│   │   └── test_deactivate_inactive_users.py
 │   ├── models.py            # User, Payment
+│   ├── tasks.py             # deactivate_inactive_users
 │   └── admin.py
 ├── media/                   # загруженные файлы — в .gitignore
 ├── .env                     # локальные секреты — в .gitignore
@@ -65,13 +76,15 @@ platfom_online_learning/
 
 - **Python** 3.11+
 - **PostgreSQL** 14+
+- **Redis** (для Celery) — https://redis.io/download
 - **Аккаунт Stripe** (для оплаты): https://dashboard.stripe.com/register
 
-Проверка версий:
+Проверка:
 
 ```bash
 python --version
 psql --version
+redis-server --version
 ```
 
 ## Быстрый старт
@@ -92,12 +105,6 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-Если PowerShell блокирует активацию:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
-
 **Linux / macOS:**
 
 ```bash
@@ -112,7 +119,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> `requirements.txt` должен быть в кодировке **UTF-8** (без BOM). Иначе `pip` упадёт с `UnicodeDecodeError`.
+> `requirements.txt` должен быть в **UTF-8 без BOM**. Иначе `pip` упадёт с `UnicodeDecodeError`.
 
 ### 4. Создать базу данных PostgreSQL
 
@@ -120,16 +127,7 @@ pip install -r requirements.txt
 CREATE DATABASE lms_db;
 ```
 
-Опционально — отдельный пользователь:
-
-```sql
-CREATE USER lms_user WITH PASSWORD 'strong_password';
-GRANT ALL PRIVILEGES ON DATABASE lms_db TO lms_user;
-```
-
-### 5. Настроить переменные окружения
-
-Скопируйте шаблон:
+### 5. Настроить `.env`
 
 ```powershell
 copy .env.example .env        # Windows
@@ -153,9 +151,12 @@ STRIPE_SECRET_KEY=sk_test_...
 STRIPE_PUBLISHABLE_KEY=pk_test_...
 STRIPE_SUCCESS_URL=http://127.0.0.1:8000/payment/success/?session_id={CHECKOUT_SESSION_ID}
 STRIPE_CANCEL_URL=http://127.0.0.1:8000/payment/cancel/
-```
+STRIPE_CURRENCY=usd
 
-> ⚠️ Если в `settings.py` используются имена `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT` — переименуйте в `DB_*`. Имена `USER` и `NAME` конфликтуют с переменными окружения ОС.
+# Email (для разработки — console)
+EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+DEFAULT_FROM_EMAIL=noreply@lms.local
+```
 
 ### 6. Миграции
 
@@ -164,26 +165,30 @@ python manage.py makemigrations
 python manage.py migrate
 ```
 
+> Если используете `django_celery_beat`:
+> ```bash
+> python manage.py migrate django_celery_beat
+> ```
+
 ### 7. Суперпользователь
 
 ```bash
 python manage.py createsuperuser
 ```
 
-Будут запрошены: `Email`, `First name`, `Last name`, `Password` (модель `User` использует email как логин).
+Будут запрошены: `Email`, `First name`, `Last name`, `Password`.
 
 ### 8. Тестовые данные (опционально)
 
-**Группа модераторов с правами:**
-
 ```bash
+# Группа модераторов
 python manage.py create_moderators_group
-```
 
-**Пользователи:**
-
-```bash
+# Пользователи
 python manage.py seed_users
+
+# Платежи (фикстура)
+python manage.py loaddata payments
 ```
 
 **Курс и уроки** (если нет):
@@ -194,27 +199,49 @@ python manage.py shell
 
 ```python
 from lms.models import Course, Lesson
-c = Course.objects.create(title='Алгебра', description='Базовый курс')
-Lesson.objects.create(course=c, title='Введение', description='Первый урок')
-Lesson.objects.create(course=c, title='Переменные', description='Второй урок')
+from decimal import Decimal
+c = Course.objects.create(title='Алгебра', description='...', price=Decimal('4990.00'))
+Lesson.objects.create(course=c, title='Введение', description='...', price=Decimal('490.00'))
+Lesson.objects.create(course=c, title='Переменные', description='...', price=Decimal('490.00'))
 exit()
 ```
 
-**Платежи (фикстура):**
+### 9. Запуск (4 терминала)
+
+#### Терминал 1 — Redis
 
 ```bash
-python manage.py loaddata payments
+redis-server
 ```
 
-> Если `loaddata payments` падает с `ForeignKeyViolation` — проверьте `pk` пользователей/курса/уроков и поправьте `users/fixtures/payments.json`.
+(или Docker: `docker run -p 6379:6379 redis`)
 
-### 9. Запуск
+#### Терминал 2 — Celery worker
+
+```bash
+celery -A config worker -l info --pool=solo
+```
+
+> На Windows — **обязательно** `--pool=solo` (иначе `eventlet`/`gevent` глючат).
+> На Linux/macOS — можно без `--pool`.
+
+#### Терминал 3 — Celery beat (планировщик)
+
+```bash
+celery -A config beat -l info
+```
+
+> `beat` **обязателен** для периодических задач (`CELERY_BEAT_SCHEDULE`). Без него задачи не ставятся.
+
+#### Терминал 4 — Django
 
 ```bash
 python manage.py runserver
 ```
 
 - API: http://127.0.0.1:8000/
+- Swagger: http://127.0.0.1:8000/api/docs/
+- ReDoc: http://127.0.0.1:8000/api/redoc/
 - Админка: http://127.0.0.1:8000/admin/
 
 ## Переменные окружения
@@ -228,24 +255,23 @@ python manage.py runserver
 | `DB_PASSWORD` | ✅ | пароль БД |
 | `DB_HOST` | ✅ | хост PostgreSQL |
 | `DB_PORT` | ✅ | порт PostgreSQL |
-| `STRIPE_SECRET_KEY` | ✅ (для оплаты) | секретный ключ Stripe (`sk_test_...`) |
-| `STRIPE_PUBLISHABLE_KEY` | ✅ (для оплаты) | публичный ключ Stripe (`pk_test_...`) |
-| `STRIPE_SUCCESS_URL` | ✅ (для оплаты) | URL после успешной оплаты |
-| `STRIPE_CANCEL_URL` | ✅ (для оплаты) | URL после отмены оплаты |
+| `STRIPE_SECRET_KEY` | ✅ (для оплаты) | `sk_test_...` |
+| `STRIPE_PUBLISHABLE_KEY` | ✅ (для оплаты) | `pk_test_...` |
+| `STRIPE_SUCCESS_URL` | ✅ (для оплаты) | URL после оплаты |
+| `STRIPE_CANCEL_URL` | ✅ (для оплаты) | URL после отмены |
+| `STRIPE_CURRENCY` | ⛔ | `usd` / `rub` (по умолчанию `usd`) |
 
 `.env` **не коммитится**. В репозитории — только `.env.example`.
 
 ## Аутентификация (JWT)
 
-Эндпоинты для получения токенов **открыты** (без авторизации):
-
 | Метод | URL | Что делает |
 |---|---|---|
-| POST | `/api/token/` | получить `access` + `refresh` по email/паролю |
-| POST | `/api/token/refresh/` | обновить `access` по `refresh` |
-| POST | `/register/` | регистрация пользователя |
+| POST | `/users/token/` | получить `access` + `refresh` |
+| POST | `/users/token/refresh/` | обновить `access` |
+| POST | `/users/register/` | регистрация |
 
-Все остальные эндпоинты требуют заголовок:
+Все остальные эндпоинты требуют:
 
 ```
 Authorization: Bearer <access_token>
@@ -254,7 +280,7 @@ Authorization: Bearer <access_token>
 **Пример логина:**
 
 ```http
-POST /api/token/
+POST /users/token/
 Content-Type: application/json
 
 {"email": "admin@example.com", "password": "testpass123"}
@@ -263,157 +289,71 @@ Content-Type: application/json
 → `200 OK`:
 
 ```json
-{
-    "access": "eyJ...",
-    "refresh": "eyJ..."
-}
+{"access": "eyJ...", "refresh": "eyJ..."}
 ```
 
 ## API — эндпоинты
 
 Базовый URL: `http://127.0.0.1:8000`
 
-### Курсы (ViewSet — полный CRUD)
+### Курсы (ViewSet)
 
 | Метод | URL | Действие |
 |---|---|---|
-| GET | `/courses/` | список курсов (пагинация, `count_lessons`, `lessons`, `is_subscribed`) |
-| POST | `/courses/` | создать курс |
-| GET | `/courses/{id}/` | получить курс |
-| PUT/PATCH | `/courses/{id}/` | обновить курс |
-| DELETE | `/courses/{id}/` | удалить курс |
+| GET | `/courses/` | список (пагинация, `count_lessons`, `lessons`, `is_subscribed`) |
+| POST | `/courses/` | создать |
+| GET | `/courses/{id}/` | получить |
+| PUT/PATCH | `/courses/{id}/` | обновить (→ рассылка подписчикам) |
+| DELETE | `/courses/{id}/` | удалить |
 
-**Права:** модератор — просмотр/редактирование любых, без создания/удаления; владелец — полный доступ к своим; остальные — только свои (через `get_queryset`).
+**Права:** модератор — просмотр/редактирование любых, без создания/удаления; владелец — полный доступ к своим.
 
-**Пример ответа `GET /courses/`:**
-
-```json
-{
-    "count": 1,
-    "next": null,
-    "previous": null,
-    "results": [
-        {
-            "id": 1,
-            "title": "Алгебра",
-            "description": "Базовый курс",
-            "preview": null,
-            "count_lessons": 2,
-            "is_subscribed": true,
-            "lessons": [
-                {"id": 2, "course": 1, "title": "Введение", "description": "...", "preview": null, "video_url": ""},
-                {"id": 3, "course": 1, "title": "Переменные", "description": "...", "preview": null, "video_url": ""}
-            ]
-        }
-    ]
-}
-```
-
-### Уроки (Generic-классы)
+### Уроки (Generic)
 
 | Метод | URL | Действие |
 |---|---|---|
-| GET | `/lessons/` | список уроков (пагинация) |
-| POST | `/lessons/create/` | создать урок (только в **свой** курс) |
-| GET | `/lessons/{id}/` | получить урок |
-| PUT/PATCH | `/lessons/{id}/update/` | обновить урок |
-| DELETE | `/lessons/{id}/delete/` | удалить урок |
+| GET | `/lessons/` | список (пагинация) |
+| POST | `/lessons/create/` | создать (только в **свой** курс) |
+| GET | `/lessons/{id}/` | получить |
+| PUT/PATCH | `/lessons/{id}/update/` | обновить |
+| DELETE | `/lessons/{id}/delete/` | удалить |
 
-**Права:** как у курсов. При создании `owner` ставится автоматически из `request.user`. Если `course` не принадлежит текущему пользователю → `403`.
+**Валидация `video_url`:** только `youtube.com` / `youtu.be`.
 
-**Валидация `video_url`:** разрешены только ссылки на `youtube.com` / `youtu.be` (см. `lms/validators.py`). Ссылки на другие ресурсы → `400`.
-
-**Пример создания урока:**
-
-```http
-POST /lessons/create/
-Authorization: Bearer <access>
-Content-Type: application/json
-
-{
-    "course": 1,
-    "title": "Введение",
-    "description": "Первый урок",
-    "video_url": "https://www.youtube.com/watch?v=abc123"
-}
-```
-
-### Профиль пользователя
+### Профиль
 
 | Метод | URL | Действие |
 |---|---|---|
-| GET | `/users/{id}/` | получить профиль |
-| PUT/PATCH | `/users/{id}/` | обновить профиль |
+| GET | `/users/{id}/` | профиль |
+| PUT/PATCH | `/users/{id}/` | обновить |
 | GET | `/users/{id}/payments/` | профиль + история платежей |
 
-**Пример ответа `GET /users/1/payments/`:**
-
-```json
-{
-    "id": 1,
-    "email": "admin@example.com",
-    "first_name": "Иван",
-    "last_name": "Иванов",
-    "phone": null,
-    "city": null,
-    "avatar": null,
-    "payments": [
-        {"id": 3, "paid_at": "2026-11-10T09:15:00+03:00", "course": null, "lesson": 2, "amount": "490.00", "payment_method": "transfer"}
-    ]
-}
-```
-
-### Платежи (список с фильтрацией и сортировкой)
+### Платежи
 
 | Метод | URL | Действие |
 |---|---|---|
-| GET | `/payments/` | список платежей |
+| GET | `/payments/` | список с фильтрацией и сортировкой |
 
-**Параметры:**
+**Параметры:** `?ordering=paid_at` / `-paid_at`, `?course=1`, `?lesson=2`, `?payment_method=cash|transfer|stripe`.
 
-| Параметр | Пример | Описание |
-|---|---|---|
-| `ordering` | `?ordering=paid_at` / `?ordering=-paid_at` | сортировка по дате |
-| `course` | `?course=1` | фильтр по курсу |
-| `lesson` | `?lesson=2` | фильтр по уроку |
-| `payment_method` | `?payment_method=cash` / `transfer` / `stripe` | фильтр по способу |
-
-### Подписка на обновления курса
+### Подписка
 
 | Метод | URL | Действие |
 |---|---|---|
-| POST | `/subscriptions/` | toggle: есть подписка — удаляет, нет — создаёт |
+| POST | `/subscriptions/` | toggle: есть — удаляет, нет — создаёт |
 
-**Тело:**
+**Тело:** `{"course_id": 1}`. Ответ: `{"message": "...", "subscribed": true/false}`.
 
-```json
-{"course_id": 1}
-```
-
-**Ответ:**
-
-```json
-{"message": "Подписка добавлена", "subscribed": true}
-```
-
-При повторном вызове с тем же `course_id`:
-
-```json
-{"message": "Подписка удалена", "subscribed": false}
-```
-
-Признак подписки текущего пользователя отдаётся в `CourseSerializer` как поле `is_subscribed`.
-
-### Оплата через Stripe
+### Stripe (оплата)
 
 | Метод | URL | Действие |
 |---|---|---|
-| POST | `/payments/create/` | создать продукт, цену, сессию в Stripe; сохранить `payment_url` |
-| GET | `/payments/{id}/status/` | проверить статус сессии в Stripe |
-| GET | `/payment/success/` | редирект после успешной оплаты |
-| GET | `/payment/cancel/` | редирект после отмены |
+| POST | `/payments/create/` | создать продукт, цену, сессию; сохранить `payment_url` |
+| GET | `/payments/{id}/status/` | статус Stripe-сессии + синхронизация `paid_at` |
+| GET | `/payment/success/` | callback после оплаты |
+| GET | `/payment/cancel/` | callback после отмены |
 
-**Пример создания платежа:**
+**Пример:**
 
 ```http
 POST /payments/create/
@@ -434,48 +374,11 @@ Content-Type: application/json
 }
 ```
 
-Откройте `payment_url` в браузере → страница Stripe → тестовая карта:
-
-| Поле | Значение |
-|---|---|
-| Номер карты | `4242 4242 4242 4242` |
-| Дата | любая будущая (например `12/34`) |
-| CVC | любые 3 цифры (например `123`) |
-
-После оплаты — редирект на `STRIPE_SUCCESS_URL`.
-
-**Проверка статуса:**
-
-```http
-GET /payments/1/status/
-Authorization: Bearer <access>
-```
-
-→ `200 OK`:
-
-```json
-{
-    "payment_id": 1,
-    "stripe_status": "complete",
-    "stripe_payment_status": "paid",
-    "paid_at": "2026-11-26T10:00:00+03:00"
-}
-```
-
-**Сервисные функции** — в `lms/services/stripe_service.py`:
-
-- `create_stripe_product(name, description)` → dict
-- `create_stripe_price(product_id, amount, currency)` → dict (сумма **в центах**)
-- `create_stripe_checkout_session(price_id, success_url, cancel_url, metadata)` → dict
-- `retrieve_stripe_session(session_id)` → dict
-
-> ⚠️ Сумма передаётся в минимальных единицах: `49.90 usd` → `int(Decimal('49.90') * 100)` = `4990` центов. Валюта — `usd` (бизнес в США).
+**Тестовая карта:** `4242 4242 4242 4242`, дата — любая будущая, CVC — любые 3 цифры.
 
 ## Права доступа
 
 ### Группа `Moderators`
-
-Создаётся командой:
 
 ```bash
 python manage.py create_moderators_group
@@ -483,7 +386,7 @@ python manage.py create_moderators_group
 
 Права: `view`/`change` для `Course` и `Lesson` (без `add`/`delete`).
 
-Назначение пользователя в группу — **через админку**: `/admin/users/user/` → пользователь → блок **Groups** → добавить `Moderators` → Save.
+Назначение пользователя — **через админку**: `/admin/users/user/` → пользователь → **Groups** → `Moderators`.
 
 ### Permission-классы (`lms/permissions.py`)
 
@@ -491,7 +394,7 @@ python manage.py create_moderators_group
 |---|---|
 | `IsModerator` | модератор: `GET`/`PUT`/`PATCH` — можно, `POST`/`DELETE` — нельзя |
 | `IsOwner` | только владелец объекта |
-| `IsModeratorOrOwner` | модератор: просмотр/редактирование; владелец: полный доступ к своим; остальные: 403/404 |
+| `IsModeratorOrOwner` | модератор: просмотр/редактирование; владелец: всё к своим |
 | `IsProfileOwnerOrAdmin` | профиль — только владелец или админ |
 
 ### Матрица доступа
@@ -499,13 +402,13 @@ python manage.py create_moderators_group
 | Роль | GET | POST | PUT/PATCH | DELETE |
 |---|---|---|---|---|
 | Аноним | 401 | 401 | 401 | 401 |
-| Авторизованный (не модератор) | свои объекты | ✅ (создаёт свои) | свои объекты | свои объекты |
+| Авторизованный | свои | ✅ (создаёт свои) | свои | свои |
 | **Модератор** | все | **403** | все | **403** |
-| Админ (`is_staff`) | все | все | все | все |
+| Админ | все | все | все | все |
 
 ## Пагинация
 
-`lms/paginators.py`:
+`lms/paginators.py` — `LmsPaginator`:
 
 ```python
 class LmsPaginator(PageNumberPagination):
@@ -514,75 +417,227 @@ class LmsPaginator(PageNumberPagination):
     max_page_size = 50
 ```
 
-Применяется к `CourseViewSet` и `LessonListAPIView`.
-
-**Параметры:**
-
-- `?page=2` — номер страницы
-- `?page_size=10` — размер страницы (макс. 50)
-- `?page=999` — `404 Not Found`
+Параметры: `?page=2`, `?page_size=10`, `?page=999` → 404.
 
 ## Валидация ссылок
 
-`lms/validators.py` — `YouTubeUrlValidator` разрешает только `youtube.com` / `youtu.be`. Интегрирован в `LessonSerializer.Meta.validators`.
+`lms/validators.py` — `YouTubeUrlValidator`: только `youtube.com` / `youtu.be`. В `LessonSerializer.Meta.validators`.
+
+## Celery — фоновые задачи
+
+### Архитектура
+
+- **Redis** — брокер сообщений и хранилище результатов.
+- **Celery worker** — выполняет задачи.
+- **Celery beat** — ставит периодические задачи по расписанию.
+- **Django** — ставит задачи (`.delay()`) и читает результаты.
+
+### Задача 1 — рассылка подписчикам (`lms/tasks.py`)
 
 ```python
-class LessonSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Lesson
-        fields = '__all__'
-        read_only_fields = ['owner']
-        validators = [YouTubeUrlValidator(field='video_url')]
+@shared_task
+def send_course_update_email(course_id):
+    """Письмо всем подписчикам курса."""
+    from lms.models import Course
+    from lms.models import Subscription
+    from django.core.mail import send_mail
+    from django.conf import settings
+
+    try:
+        course = Course.objects.get(pk=course_id)
+    except Course.DoesNotExist:
+        return 0
+
+    emails = list(
+        Subscription.objects
+        .filter(course=course)
+        .values_list('user__email', flat=True)
+    )
+    if not emails:
+        return 0
+
+    send_mail(
+        subject=f'Обновление курса: {course.title}',
+        message=f'Курс «{course.title}» был обновлён.\n\n{course.description}',
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=emails,
+        fail_silently=False,
+    )
+    return len(emails)
+```
+
+**Вызов:** в `CourseViewSet.perform_update`:
+
+```python
+def perform_update(self, serializer):
+    course = serializer.save()
+    send_course_update_email.delay(course.id)
+```
+
+> Рассылка — **при обновлении** (`PATCH`/`PUT`), не при создании. При создании подписчиков ещё нет.
+
+### Задача 2 — блокировка неактивных (`users/tasks.py`)
+
+```python
+@shared_task
+def deactivate_inactive_users():
+    """Блокирует пользователей, не заходивших > 30 дней."""
+    from django.contrib.auth import get_user_model
+    from django.utils import timezone
+    from datetime import timedelta
+
+    User = get_user_model()
+    threshold = timezone.now() - timedelta(days=30)
+
+    updated = User.objects.filter(
+        last_login__lt=threshold,
+        is_active=True,
+    ).update(is_active=False)
+
+    return f'Заблокировано пользователей: {updated}'
+```
+
+**Расписание** (`settings.py`):
+
+```python
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    'deactivate-inactive-users': {
+        'task': 'users.tasks.deactivate_inactive_users',
+        'schedule': crontab(hour=3, minute=0),   # каждый день в 03:00
+    },
+}
+```
+
+### Timezone — **критично**
+
+```python
+TIME_ZONE = 'UTC'
+CELERY_TIMEZONE = TIME_ZONE        # ← должно совпадать!
+CELERY_ENABLE_UTC = True
+```
+
+Если `TIME_ZONE != CELERY_TIMEZONE` — `crontab(hour=3)` запустится в 03:00 **по `CELERY_TIMEZONE`**, а не по `TIME_ZONE`. Задача будет «не тогда».
+
+### Настройки Celery (`settings.py`)
+
+```python
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60
+```
+
+### Запуск
+
+```bash
+# Терминал 1
+redis-server
+
+# Терминал 2
+celery -A config worker -l info --pool=solo
+
+# Терминал 3
+celery -A config beat -l info
+
+# Терминал 4
+python manage.py runserver
+```
+
+### Проверка задач
+
+**Рассылка:**
+
+```http
+PATCH /courses/1/
+Authorization: Bearer <owner>
+Content-Type: application/json
+
+{"title": "Алгебра (обновлено)"}
+```
+
+В терминале **worker**:
+
+```
+Task lms.tasks.send_course_update_email[...] received
+[WARNING/ForkPoolWorker-1] Subject: Обновление курса: ...
+To: subscriber@example.com
+...
+Task ... succeeded in 0.05s: 1
+```
+
+**Блокировка:**
+
+```bash
+python manage.py shell
+```
+```python
+from django.contrib.auth import get_user_model
+from django.utils import timezone
+from datetime import timedelta
+
+User = get_user_model()
+u = User.objects.create_user(email='old@example.com', password='pass', first_name='Old', last_name='User')
+User.objects.filter(pk=u.pk).update(last_login=timezone.now() - timedelta(days=40))
+```
+
+Подождите (или временно `crontab(minute='*')`) — в терминале **beat**:
+
+```
+Scheduler: Sending due task deactivate-inactive-users
+```
+
+В терминале **worker**:
+
+```
+Task users.tasks.deactivate_inactive_users[...] received
+Task ... succeeded ...: Заблокировано пользователей: 1
+```
+
+Проверка:
+
+```python
+User.objects.get(email='old@example.com').is_active   # False
 ```
 
 ## Модели
 
 ### `User` (`users`)
 
-Наследуется от `AbstractBaseUser` + `PermissionsMixin`. `USERNAME_FIELD = 'email'`, `REQUIRED_FIELDS = ['first_name', 'last_name']`. Управляется `UserManager`. Пароль хэшируется через `set_password()`.
+`AbstractBaseUser` + `PermissionsMixin`. `USERNAME_FIELD = 'email'`. `last_login` — стандартное поле Django, обновляется при логине через `django.contrib.auth.login` / JWT.
 
 ### `Course` (`lms`)
 
-`title`, `preview`, `description`, `owner` (FK на `User`, `related_name='courses'`).
+`title`, `preview`, `description`, `price`, `owner` (FK).
 
 ### `Lesson` (`lms`)
 
-`course` (FK, `related_name='lessons'`), `title`, `description`, `preview`, `video_url`, `owner` (FK, `related_name='lessons'`).
+`course` (FK), `title`, `description`, `preview`, `video_url`, `price`, `owner` (FK).
 
 ### `Subscription` (`lms`)
 
-`user` (FK), `course` (FK), `created_at`. `UniqueConstraint(user, course)` — нельзя подписаться дважды.
+`user` (FK), `course` (FK), `created_at`. `UniqueConstraint(user, course)`.
 
 ### `Payment` (`users`)
 
-| Поле | Тип | Примечание |
-|---|---|---|
-| `user` | FK | `related_name='payments'` |
-| `paid_at` | DateTimeField | `null=True, blank=True` — проставляется после оплаты |
-| `course` | FK | `null=True, blank=True` |
-| `lesson` | FK | `null=True, blank=True` |
-| `amount` | DecimalField(10, 2) | `MinValueValidator(0.01)` |
-| `payment_method` | CharField | choices: `cash` / `transfer` / `stripe` |
-| `stripe_product_id` | CharField | ID продукта в Stripe |
-| `stripe_price_id` | CharField | ID цены в Stripe |
-| `stripe_session_id` | CharField | ID сессии в Stripe |
-| `payment_url` | URLField | ссылка на оплату |
-
-Правило: платёж за **курс** или **урок** (XOR, через `CheckConstraint`).
+`user` (FK), `paid_at` (nullable), `course` (FK, nullable), `lesson` (FK, nullable), `amount`, `payment_method` (`cash`/`transfer`/`stripe`), `stripe_product_id`, `stripe_price_id`, `stripe_session_id`, `payment_url`.
 
 ## Тесты
 
 ```bash
 python manage.py test lms
+python manage.py test users
 ```
 
 Покрытие:
 
-- **CRUD уроков** (`test_lessons_crud.py`) — владелец / чужой / модератор / аноним; list / retrieve / create / update / delete.
-- **Подписка** (`test_subscriptions.py`) — toggle, 404, 401, `is_subscribed` true/false/чужой.
-- Аутентификация — через `self.client.force_authenticate(user=...)`.
-
-Ожидаемо: `Ran 25 tests ... OK`.
+- **CRUD уроков** — владелец / чужой / модератор / аноним.
+- **Подписка** — toggle, 404, 401, `is_subscribed`.
+- **Stripe** — моки Stripe, сохранение ID, сумма в центах, ошибка Stripe, синхронизация `paid_at`, чужой платёж.
+- **Рассылка** — `mail.outbox`, подписчики, не-подписчики, создание без письма.
+- **Блокировка неактивных** — `last_login` > 30 дней → `is_active=False`.
 
 ## Запуск с чистого окружения
 
@@ -609,7 +664,7 @@ python manage.py runserver
 pip install django-filter
 ```
 
-В `settings.py` — `'django_filters'` (подчёркивание, не дефис).
+В `settings.py` — `'django_filters'` (подчёркивание).
 
 ### `AttributeError: 'ellipsis' object has no attribute 'rsplit'`
 
@@ -617,7 +672,7 @@ pip install django-filter
 
 ### `UnicodeDecodeError` при `pip install -r requirements.txt`
 
-`requirements.txt` в UTF-16. Пересохраните в UTF-8 без BOM (PyCharm: Convert → UTF-8).
+`requirements.txt` в UTF-16. Пересохраните в UTF-8 без BOM.
 
 ### `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xc2` (PostgreSQL)
 
@@ -632,13 +687,13 @@ pip install "psycopg[binary]"
 pip install Pillow
 ```
 
-### `models.E015: 'ordering' refers to the nonexistent field 'order'`
+### `models.E015: 'ordering' refers to the nonexistent field`
 
-В `Meta.ordering` указано несуществующее поле. Проверьте имена.
+В `Meta.ordering` — несуществующее поле. Проверьте.
 
 ### `loaddata payments`: `ForeignKeyViolation`
 
-Фикстура ссылается на несуществующий `pk`. Проверьте `pk` в БД и поправьте `payments.json`.
+Фикстура ссылается на несуществующий `pk`. Проверьте `pk` в БД.
 
 ### `loaddata payments`: `Invalid model identifier: lms.payment`
 
@@ -646,21 +701,55 @@ pip install Pillow
 
 ### `IntegrityError: значение NULL в столбце "paid_at"`
 
-`paid_at` — `NOT NULL`, а view не передаёт дату. Сделайте `paid_at = DateTimeField(null=True, blank=True)` и проставляйте после оплаты.
+`paid_at` — `NOT NULL`, а view не передаёт. Сделайте `null=True, blank=True`.
 
 ### `404` на `/payment/success/`
 
-Нет маршрута. Добавьте `path('payment/success/', ...)` в `config/urls.py` (или `lms/urls.py`).
+Нет маршрута. Добавьте `path('payment/success/', ...)` в `config/urls.py`.
 
 ### `NoReverseMatch: 'course-detail' / 'course-subscribe'`
 
-`basename` в роутере — `course` (единственное число). Имя подписки — `subscription-toggle`, если URL `subscriptions/` с `course_id` в теле.
+`basename='course'` в роутере (единственное число). Подписка — `subscription-toggle` (если `subscriptions/` с `course_id` в теле).
+
+### `405 Method Not Allowed` на `/courses/{id}/`
+
+`POST` на detail не поддерживается. Для создания — `POST /courses/` (без `{pk}`). Для обновления — `PATCH /courses/{id}/`.
 
 ### Stripe API недоступен из РФ
 
 - VPN/прокси на уровне сети.
-- `stripe.proxy = 'http://user:pass@proxy-host:port'` в `stripe_service.py`.
-- Деплой на сервер вне РФ (Railway, Render, VPS в Европе/США).
+- `stripe.proxy = 'http://...'` в `stripe_service.py`.
+- Деплой на сервер вне РФ.
+
+### Celery: `ConnectionRefusedError` к Redis
+
+Redis не запущен. `redis-server` в отдельном терминале. Проверьте `CELERY_BROKER_URL = 'redis://localhost:6379/0'`.
+
+### Celery: задача `succeeded: 0` (рассылка)
+
+Нет подписчиков у курса. `Subscription.objects.create(user=..., course_id=1)`.
+
+### Celery: `WSAECONNREFUSED` при `send_mail`
+
+SMTP недоступен, а `EMAIL_BACKEND = smtp`. Для проверки — `console.EmailBackend`. **Перезапустите worker** (он читает `settings.py` при старте).
+
+### Celery: `--pool=solo` на Windows
+
+На Windows `eventlet`/`gevent` глючат. Всегда `--pool=solo`.
+
+### Celery beat не ставит задачи
+
+`beat` не запущен. `celery -A config beat -l info` — отдельный терминал. `worker` сам не ставит периодические задачи.
+
+### Задача выполняется «не тогда»
+
+`TIME_ZONE != CELERY_TIMEZONE`. Сделайте одинаковыми: `CELERY_TIMEZONE = TIME_ZONE`.
+
+### `django_celery_beat`: таблиц нет
+
+```bash
+python manage.py migrate django_celery_beat
+```
 
 ## Полезные команды
 
@@ -683,6 +772,12 @@ python manage.py loaddata payments
 
 # Тесты
 python manage.py test lms
+python manage.py test users
+
+# Celery
+redis-server
+celery -A config worker -l info --pool=solo
+celery -A config beat -l info
 
 # Shell
 python manage.py shell
