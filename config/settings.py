@@ -2,6 +2,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -90,7 +91,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "Europe/Moscow"
 
 USE_I18N = True
 
@@ -140,7 +141,8 @@ CELERY_BROKER_URL = 'redis://localhost:6379'  # Например, Redis, кот�
 CELERY_RESULT_BACKEND = 'redis://localhost:6379'
 
 # Часовой пояс для работы Celery
-CELERY_TIMEZONE = "Europe/Moscow"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_ENABLE_UTC = True
 
 # Флаг отслеживания выполнения задач
 CELERY_TASK_TRACK_STARTED = True
@@ -161,3 +163,10 @@ CORS_ALLOW_ALL_ORIGINS = False
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 DEFAULT_FROM_EMAIL = 'noreply@lms.local'
+
+CELERY_BEAT_SCHEDULE = {
+    'deactivate-inactive-users': {
+        'task': 'users.tasks.deactivate_inactive_users',
+        'schedule': crontab(hour=3, minute=0),
+    }
+}
